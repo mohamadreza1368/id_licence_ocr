@@ -20,11 +20,18 @@
 ## 🚀 مراحل آموزش و استفاده گام‌به‌گام
 
 ### گام اول: آماده‌سازی دیتا و برش فیلدها
-پوشه حاوی تصاویر و فایل‌های JSON دیتای خود را مشخص کنید و دستور زیر را اجرا کنید:
+دیتای شما که دارای دو پوشه `labels` و `images` است را به راحتی با یکی از دستورات زیر اجرا کنید:
+
+**حالت ۱ (ساده‌ترین - دادن پوشه اصلی که شامل دو فولدر labels و images است):**
 ```bash
-python prepare_dataset.py --data_dir "D:/path/to/your/dataset" --val_split 0.15
+python prepare_dataset.py --data_dir "D:/path/to/dataset"
 ```
-این اسکریپت تمام فیلدها (`BirthDate`، کد ملی، نام و...) را بر اساس مختصات `updated_bbox` برش زده و در `data/crops/` ذخیره می‌کند.
+
+**حالت ۲ (مشخص کردن مستقیم هر دو پوشه):**
+```bash
+python prepare_dataset.py --labels_dir "D:/path/to/labels" --images_dir "D:/path/to/images"
+```
+این اسکریپت تمام عکس‌ها را ایندکس کرده، فایل‌های JSON مربوطه را تطبیق می‌دهد و فیلدها (`BirthDate`، کد ملی، نام و...) را بر اساس مختصات `updated_bbox` برش زده و در `data/crops/` ذخیره می‌کند.
 
 ### گام دوم: اجرای آموزش (Training)
 برای شروع آموزش مدل:

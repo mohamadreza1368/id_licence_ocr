@@ -11,142 +11,166 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".webp", ".JPG", ".JPEG", ".PNG"]
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-def find_matching_image(j_path: str, data: dict, raw_data_dir: str):
+def build_image_index(images_dir: str):
     """
-    Intelligently finds the matching image for a given json file across
-    multiple naming conventions and folder structures.
+    Builds a fast lookup dictionary for all image files in images_dir.
+    Maps various stem/filename variations to the full path.
     """
-    j_dir = os.path.dirname(os.path.abspath(j_path))
+    image_index = {}
+    if not images_dir or not os.path.isdir(images_dir):
+        return image_index
+
+    for root, _, files in os.walk(images_dir):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                full_path = os.path.join(root, f)
+                stem = os.path.splitext(f)[0]
+
+                # Map full filename: 'card_1.jpg'
+                image_index[f] = full_path
+                image_index[f.lower()] = full_path
+
+                # Map stem without ext: 'card_1'
+                image_index[stem] = full_path
+                image_index[stem.lower()] = full_path
+
+                # If double extension like 'card_1.jpg':
+                if any(stem.lower().endswith(e) for e in IMAGE_EXTENSIONS):
+                    inner_stem = os.path.splitext(stem)[0]
+                    image_index[inner_stem] = full_path
+                    image_index[inner_stem.lower()] = full_path
+
+    return image_index
+
+def resolve_directories(data_dir: str = None, labels_dir: str = None, images_dir: str = None):
+    """
+    Intelligently resolves labels_dir and images_dir from user input.
+    Supports:
+      1. Explicit --labels_dir and --images_dir
+      2. Root folder --data_dir containing 'labels' and 'images' subdirectories
+      3. User passing --data_dir pointing directly to either 'labels' or 'images'
+    """
+    if data_dir:
+        data_dir = os.path.abspath(data_dir)
+
+        # Check if data_dir has 'labels' and 'images' subdirectories
+        sub_labels = os.path.join(data_dir, "labels")
+        sub_images = os.path.join(data_dir, "images")
+
+        if os.path.isdir(sub_labels) and not labels_dir:
+            labels_dir = sub_labels
+        if os.path.isdir(sub_images) and not images_dir:
+            images_dir = sub_images
+
+        # Check if data_dir itself is the 'labels' folder
+        base_name = os.path.basename(data_dir).lower()
+        if base_name == "labels" and not labels_dir:
+            labels_dir = data_dir
+            parent = os.path.dirname(data_dir)
+            cand_img = os.path.join(parent, "images")
+            if os.path.isdir(cand_img) and not images_dir:
+                images_dir = cand_img
+
+        # Check if data_dir itself is the 'images' folder
+        elif base_name == "images" and not images_dir:
+            images_dir = data_dir
+            parent = os.path.dirname(data_dir)
+            cand_lbl = os.path.join(parent, "labels")
+            if os.path.isdir(cand_lbl) and not labels_dir:
+                labels_dir = cand_lbl
+
+        # Fallback: if labels_dir is still not found, search for json files in data_dir
+        if not labels_dir:
+            labels_dir = data_dir
+        if not images_dir:
+            images_dir = data_dir
+
+    return labels_dir, images_dir
+
+def find_image_for_json(j_path: str, data: dict, image_index: dict, images_dir: str):
+    """
+    Finds matching image path using fast lookup index or JSON metadata.
+    """
     j_basename = os.path.basename(j_path)
     j_stem = os.path.splitext(j_basename)[0]
 
-    # Strategy 1: Double extension (e.g. 'sample.jpg.json' -> 'sample.jpg')
-    base_no_ext = os.path.splitext(j_path)[0]
-    if os.path.isfile(base_no_ext):
-        return base_no_ext
+    # 1. Lookup stem directly ('card_1')
+    if j_stem in image_index:
+        return image_index[j_stem]
+    if j_stem.lower() in image_index:
+        return image_index[j_stem.lower()]
 
-    # Strategy 2: Exact stem in the same folder (e.g. 'sample.json' -> 'sample.jpg')
-    for ext in IMAGE_EXTENSIONS:
-        cand = os.path.join(j_dir, j_stem + ext)
-        if os.path.isfile(cand):
-            return cand
+    # 2. If json is named 'card_1.jpg.json' -> stem is 'card_1.jpg'
+    if j_stem.endswith((".jpg", ".jpeg", ".png")):
+        clean_stem = os.path.splitext(j_stem)[0]
+        if clean_stem in image_index:
+            return image_index[clean_stem]
 
-    # Strategy 3: Check inside JSON metadata for image name / path
-    keys_to_check = ["image_path", "image_name", "filename", "file_name", "image", "img", "image_file"]
-    for key in keys_to_check:
-        val = data.get(key)
+    # 3. Check inside JSON fields: 'image_name', 'filename', etc.
+    for k in ["image_path", "image_name", "filename", "file_name", "image"]:
+        val = data.get(k)
         if isinstance(val, str) and val.strip():
-            # Check direct path
-            if os.path.isfile(val):
-                return val
-            # Check relative to j_dir
-            cand1 = os.path.join(j_dir, val)
-            if os.path.isfile(cand1):
-                return cand1
-            # Check relative to raw_data_dir
-            cand2 = os.path.join(raw_data_dir, val)
-            if os.path.isfile(cand2):
-                return cand2
-            # Check basename in j_dir
-            cand3 = os.path.join(j_dir, os.path.basename(val))
-            if os.path.isfile(cand3):
-                return cand3
+            b = os.path.basename(val)
+            if b in image_index:
+                return image_index[b]
+            b_stem = os.path.splitext(b)[0]
+            if b_stem in image_index:
+                return image_index[b_stem]
 
-    # Check nested dictionary metadata (e.g. processed_image, original_image)
-    for nested_key in ["processed_image", "original_image", "image_info", "metadata"]:
-        nested = data.get(nested_key)
-        if isinstance(nested, dict):
-            for subkey in ["path", "filename", "name", "file", "image_path", "image_name"]:
-                val = nested.get(subkey)
-                if isinstance(val, str) and val.strip():
-                    for check_dir in [j_dir, raw_data_dir]:
-                        c = os.path.join(check_dir, os.path.basename(val))
-                        if os.path.isfile(c):
-                            return c
+    # 4. Try stripping common suffixes like '_label', '_annotation'
+    for suffix in ["_label", "-label", "_annot", "_metadata"]:
+        if j_stem.lower().endswith(suffix):
+            cand = j_stem[:-len(suffix)]
+            if cand in image_index:
+                return image_index[cand]
+            if cand.lower() in image_index:
+                return image_index[cand.lower()]
 
-    # Strategy 4: Sibling directories (e.g. json in 'labels/' or 'annotations/', images in 'images/')
-    parent_dir = os.path.dirname(j_dir)
-    possible_img_dirs = [
-        j_dir,
-        parent_dir,
-        os.path.join(parent_dir, "images"),
-        os.path.join(parent_dir, "image"),
-        os.path.join(parent_dir, "imgs"),
-        os.path.join(parent_dir, "img"),
-        os.path.join(parent_dir, "processed"),
-        os.path.join(parent_dir, "original"),
-        os.path.join(parent_dir, "cards"),
-        os.path.join(raw_data_dir, "images"),
-        os.path.join(raw_data_dir, "imgs"),
-    ]
-    for p_dir in possible_img_dirs:
-        if os.path.isdir(p_dir):
-            for ext in IMAGE_EXTENSIONS:
-                cand = os.path.join(p_dir, j_stem + ext)
-                if os.path.isfile(cand):
-                    return cand
-
-    # Strategy 5: Suffix variations (e.g. 'sample_label.json' -> 'sample.jpg', or 'sample.json' -> 'sample_processed.jpg')
-    cleaned_stem = j_stem
-    for suffix in ["_label", "_annot", "_annotation", "_metadata", "-label", "_json"]:
-        if cleaned_stem.lower().endswith(suffix):
-            cleaned_stem = cleaned_stem[:-len(suffix)]
-            break
-
-    for p_dir in [j_dir, parent_dir]:
-        if os.path.isdir(p_dir):
-            for ext in IMAGE_EXTENSIONS:
-                # e.g. cleaned stem
-                cand = os.path.join(p_dir, cleaned_stem + ext)
-                if os.path.isfile(cand):
-                    return cand
-                # e.g. _processed or _original suffixes
-                for variant in [f"{cleaned_stem}_processed{ext}", f"processed_{cleaned_stem}{ext}", f"{cleaned_stem}_original{ext}"]:
-                    cand_v = os.path.join(p_dir, variant)
-                    if os.path.isfile(cand_v):
-                        return cand_v
-
-    # Strategy 6: If the directory contains exactly one image, pair them
-    if os.path.isdir(j_dir):
-        files_in_dir = os.listdir(j_dir)
-        imgs_in_dir = [f for f in files_in_dir if any(f.lower().endswith(e.lower()) for e in IMAGE_EXTENSIONS)]
-        if len(imgs_in_dir) == 1:
-            return os.path.join(j_dir, imgs_in_dir[0])
-
-    # Strategy 7: Recursive search in raw_data_dir for file with matching stem
-    for ext in IMAGE_EXTENSIONS:
-        matched = glob.glob(os.path.join(raw_data_dir, "**", f"{j_stem}{ext}"), recursive=True)
-        if matched:
-            return matched[0]
-        if cleaned_stem != j_stem:
-            matched2 = glob.glob(os.path.join(raw_data_dir, "**", f"{cleaned_stem}{ext}"), recursive=True)
-            if matched2:
-                return matched2[0]
+    # 5. Direct check in images_dir if index missed it
+    if images_dir and os.path.isdir(images_dir):
+        for ext in [".jpg", ".JPG", ".jpeg", ".JPEG", ".png", ".PNG"]:
+            cand_p = os.path.join(images_dir, j_stem + ext)
+            if os.path.isfile(cand_p):
+                return cand_p
 
     return None
 
-
-def crop_fields_from_dataset(raw_data_dir: str, val_split: float = 0.15):
+def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, images_dir: str = None, val_split: float = 0.15):
     """
-    Scans raw_data_dir for pairs of .json and corresponding image files.
-    Crops each field in 'fields' list, saves crops to data/crops/,
-    and writes train.txt and val.txt.
+    Prepares dataset by cropping text bounding boxes from matched card images.
     """
     os.makedirs(config.CROPS_DIR, exist_ok=True)
     os.makedirs(config.DATA_DIR, exist_ok=True)
 
-    json_files = glob.glob(os.path.join(raw_data_dir, "**", "*.json"), recursive=True)
-    if not json_files:
-        print(f"[!] No JSON files found in {raw_data_dir}")
+    labels_dir, images_dir = resolve_directories(data_dir, labels_dir, images_dir)
+
+    print(f"[*] Labels directory: {labels_dir}")
+    print(f"[*] Images directory: {images_dir}")
+
+    if not labels_dir or not os.path.isdir(labels_dir):
+        print(f"[!] Labels directory does not exist: {labels_dir}")
         return
 
-    print(f"[*] Found {len(json_files)} JSON annotation files in {raw_data_dir}")
+    # Index all images in images_dir
+    print("[*] Indexing images...")
+    image_index = build_image_index(images_dir)
+    print(f"    -> Found {len(set(image_index.values()))} image files in images directory.")
+
+    # Find all JSON files in labels_dir
+    json_files = glob.glob(os.path.join(labels_dir, "**", "*.json"), recursive=True)
+    print(f"    -> Found {len(json_files)} JSON annotation files.")
+
+    if not json_files:
+        print(f"[!] No JSON files found in {labels_dir}")
+        return
 
     samples = []
     crop_counter = 0
     missing_counter = 0
+    sample_images = list(set(image_index.values()))[:5]
 
     for j_path in json_files:
         try:
@@ -156,18 +180,16 @@ def crop_fields_from_dataset(raw_data_dir: str, val_split: float = 0.15):
             print(f"[!] Failed to parse {j_path}: {e}")
             continue
 
-        # Intelligent image matching
-        img_path = find_matching_image(j_path, data, raw_data_dir)
+        img_path = find_image_for_json(j_path, data, image_index, images_dir)
 
-        if not img_path:
+        if not img_path or not os.path.isfile(img_path):
             missing_counter += 1
-            if missing_counter <= 5:
-                parent_dir = os.path.dirname(j_path)
-                dir_contents = os.listdir(parent_dir)[:10] if os.path.isdir(parent_dir) else []
-                print(f"[-] Image not found for: {j_path}")
-                print(f"    Directory contents sample: {dir_contents}")
-            elif missing_counter == 6:
-                print("[-] (Suppressing further missing image logs...)")
+            if missing_counter <= 3:
+                print(f"[-] Image not found for label: {os.path.basename(j_path)}")
+                if sample_images:
+                    print(f"    (Sample available images: {[os.path.basename(p) for p in sample_images]})")
+            elif missing_counter == 4:
+                print("[-] (Suppressing further missing image messages...)")
             continue
 
         try:
@@ -232,20 +254,21 @@ def crop_fields_from_dataset(raw_data_dir: str, val_split: float = 0.15):
                     crop_filepath = os.path.join(config.CROPS_DIR, crop_filename)
                     crop_img.save(crop_filepath)
 
-                    # Record sample: relative or absolute path and label
+                    # Record sample
                     samples.append((crop_filepath, val))
                     crop_counter += 1
 
         except Exception as e:
             print(f"[!] Error processing {img_path}: {e}")
 
-    print(f"\n[+] Processing finished:")
+    print(f"\n[+] Extraction Summary:")
     print(f"    - Total JSON files: {len(json_files)}")
+    print(f"    - Successfully processed images: {len(json_files) - missing_counter}")
     print(f"    - Missing images: {missing_counter}")
-    print(f"    - Total cropped text regions created: {len(samples)}")
+    print(f"    - Total cropped text regions: {len(samples)}")
 
     if not samples:
-        print("[!] No samples could be extracted. Please check the image path and naming.")
+        print("[!] No text samples could be extracted.")
         return
 
     # Shuffle and split into train / val
@@ -270,14 +293,24 @@ def crop_fields_from_dataset(raw_data_dir: str, val_split: float = 0.15):
         for p, label in val_samples:
             f.write(f"{p}\t{label}\n")
 
-    print(f"[+] Written {len(train_samples)} training samples to: {config.TRAIN_LABEL_FILE}")
-    print(f"[+] Written {len(val_samples)} validation samples to: {config.VAL_LABEL_FILE}")
+    print(f"[+] Saved {len(train_samples)} training samples to: {config.TRAIN_LABEL_FILE}")
+    print(f"[+] Saved {len(val_samples)} validation samples to: {config.VAL_LABEL_FILE}")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Crop dataset fields for lightweight OCR training")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to folder containing json and card images")
+    parser.add_argument("--data_dir", type=str, default=None, help="Root dataset folder containing 'labels' and 'images' folders")
+    parser.add_argument("--labels_dir", type=str, default=None, help="Explicit path to labels folder")
+    parser.add_argument("--images_dir", type=str, default=None, help="Explicit path to images folder")
     parser.add_argument("--val_split", type=float, default=0.15, help="Validation set ratio (default 0.15)")
     args = parser.parse_args()
 
-    crop_fields_from_dataset(args.data_dir, args.val_split)
+    if not args.data_dir and not args.labels_dir:
+        parser.error("Please specify either --data_dir or --labels_dir")
+
+    crop_fields_from_dataset(
+        data_dir=args.data_dir,
+        labels_dir=args.labels_dir,
+        images_dir=args.images_dir,
+        val_split=args.val_split
+    )
