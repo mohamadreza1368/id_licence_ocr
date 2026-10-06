@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import glob
 import random
 from PIL import Image
 import config
@@ -11,78 +10,88 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VALID_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-def build_image_index(images_dir: str):
+def extract_clean_stem(filename: str) -> str:
     """
-    Builds a fast lookup dictionary for all image files in images_dir.
-    Maps various stem/filename variations to the full path.
+    Extracts the clean stem name from a file without any extensions.
+    Examples:
+      - 'card_001.json' -> 'card_001'
+      - 'card_001.jpg.json' -> 'card_001'
+      - 'card_001.JPG' -> 'card_001'
+      - 'card_001.jpg' -> 'card_001'
     """
-    image_index = {}
-    if not images_dir or not os.path.isdir(images_dir):
-        return image_index
+    stem = filename
+    # Strip .json
+    if stem.lower().endswith(".json"):
+        stem = stem[:-5]
+    # Strip any image extension
+    for ext in VALID_IMG_EXTS:
+        if stem.lower().endswith(ext):
+            stem = stem[:-len(ext)]
+            break
+    return stem.strip()
 
-    for root, _, files in os.walk(images_dir):
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
-                full_path = os.path.join(root, f)
-                stem = os.path.splitext(f)[0]
-
-                # Map full filename: 'card_1.jpg'
-                image_index[f] = full_path
-                image_index[f.lower()] = full_path
-
-                # Map stem without ext: 'card_1'
-                image_index[stem] = full_path
-                image_index[stem.lower()] = full_path
-
-                # If double extension like 'card_1.jpg':
-                if any(stem.lower().endswith(e) for e in IMAGE_EXTENSIONS):
-                    inner_stem = os.path.splitext(stem)[0]
-                    image_index[inner_stem] = full_path
-                    image_index[inner_stem.lower()] = full_path
-
-    return image_index
-
-def resolve_directories(data_dir: str = None, labels_dir: str = None, images_dir: str = None):
+def find_subfolder(parent: str, candidates: list):
     """
-    Intelligently resolves labels_dir and images_dir from user input.
-    Supports:
-      1. Explicit --labels_dir and --images_dir
-      2. Root folder --data_dir containing 'labels' and 'images' subdirectories
-      3. User passing --data_dir pointing directly to either 'labels' or 'images'
+    Finds a subfolder inside parent matching any candidate name (case-insensitive).
     """
+    if not parent or not os.path.isdir(parent):
+        return None
+    try:
+        for entry in os.listdir(parent):
+            full_path = os.path.join(parent, entry)
+            if os.path.isdir(full_path):
+                if entry.lower() in [c.lower() for c in candidates]:
+                    return full_path
+    except Exception:
+        pass
+    return None
+
+def resolve_dataset_paths(data_dir: str = None, labels_dir: str = None, images_dir: str = None):
+    """
+    Resolves the exact paths for labels_dir and images_dir.
+    Handles:
+      - Root folder containing 'labels' and 'images' subfolders
+      - Path directly pointing to 'labels' folder (finds sibling 'images')
+      - Path directly pointing to 'images' folder (finds sibling 'labels')
+      - Explicit --labels_dir and --images_dir arguments
+    """
+    label_folder_names = ["labels", "label", "annotations", "annotation", "json", "jsons"]
+    image_folder_names = ["images", "image", "imgs", "img", "photos", "pics", "cards"]
+
+    # If explicit paths provided
+    if labels_dir:
+        labels_dir = os.path.abspath(labels_dir)
+    if images_dir:
+        images_dir = os.path.abspath(images_dir)
+
+    # If data_dir is provided
     if data_dir:
         data_dir = os.path.abspath(data_dir)
 
-        # Check if data_dir has 'labels' and 'images' subdirectories
-        sub_labels = os.path.join(data_dir, "labels")
-        sub_images = os.path.join(data_dir, "images")
+        # Case 1: data_dir has 'labels' and 'images' subfolders
+        if not labels_dir:
+            labels_dir = find_subfolder(data_dir, label_folder_names)
+        if not images_dir:
+            images_dir = find_subfolder(data_dir, image_folder_names)
 
-        if os.path.isdir(sub_labels) and not labels_dir:
-            labels_dir = sub_labels
-        if os.path.isdir(sub_images) and not images_dir:
-            images_dir = sub_images
-
-        # Check if data_dir itself is the 'labels' folder
+        # Case 2: data_dir is the 'labels' folder itself
         base_name = os.path.basename(data_dir).lower()
-        if base_name == "labels" and not labels_dir:
+        if base_name in label_folder_names and not labels_dir:
             labels_dir = data_dir
-            parent = os.path.dirname(data_dir)
-            cand_img = os.path.join(parent, "images")
-            if os.path.isdir(cand_img) and not images_dir:
-                images_dir = cand_img
+        if base_name in label_folder_names and not images_dir:
+            parent_dir = os.path.dirname(data_dir)
+            images_dir = find_subfolder(parent_dir, image_folder_names)
 
-        # Check if data_dir itself is the 'images' folder
-        elif base_name == "images" and not images_dir:
+        # Case 3: data_dir is the 'images' folder itself
+        if base_name in image_folder_names and not images_dir:
             images_dir = data_dir
-            parent = os.path.dirname(data_dir)
-            cand_lbl = os.path.join(parent, "labels")
-            if os.path.isdir(cand_lbl) and not labels_dir:
-                labels_dir = cand_lbl
+        if base_name in image_folder_names and not labels_dir:
+            parent_dir = os.path.dirname(data_dir)
+            labels_dir = find_subfolder(parent_dir, label_folder_names)
 
-        # Fallback: if labels_dir is still not found, search for json files in data_dir
+        # Fallback if still not found
         if not labels_dir:
             labels_dir = data_dir
         if not images_dir:
@@ -90,121 +99,188 @@ def resolve_directories(data_dir: str = None, labels_dir: str = None, images_dir
 
     return labels_dir, images_dir
 
-def find_image_for_json(j_path: str, data: dict, image_index: dict, images_dir: str):
+def build_images_lookup(images_dir: str):
     """
-    Finds matching image path using fast lookup index or JSON metadata.
+    Indexes all image files inside images_dir (recursively) for fast O(1) matching.
+    Key is the clean stem (lowercase and original), value is the absolute path.
     """
-    j_basename = os.path.basename(j_path)
-    j_stem = os.path.splitext(j_basename)[0]
+    lookup = {}
+    raw_files = []
 
-    # 1. Lookup stem directly ('card_1')
-    if j_stem in image_index:
-        return image_index[j_stem]
-    if j_stem.lower() in image_index:
-        return image_index[j_stem.lower()]
+    if not images_dir or not os.path.isdir(images_dir):
+        return lookup, raw_files
 
-    # 2. If json is named 'card_1.jpg.json' -> stem is 'card_1.jpg'
-    if j_stem.endswith((".jpg", ".jpeg", ".png")):
-        clean_stem = os.path.splitext(j_stem)[0]
-        if clean_stem in image_index:
-            return image_index[clean_stem]
+    for root, _, files in os.walk(images_dir):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in VALID_IMG_EXTS:
+                full_path = os.path.abspath(os.path.join(root, f))
+                raw_files.append(full_path)
 
-    # 3. Check inside JSON fields: 'image_name', 'filename', etc.
-    for k in ["image_path", "image_name", "filename", "file_name", "image"]:
-        val = data.get(k)
-        if isinstance(val, str) and val.strip():
-            b = os.path.basename(val)
-            if b in image_index:
-                return image_index[b]
-            b_stem = os.path.splitext(b)[0]
-            if b_stem in image_index:
-                return image_index[b_stem]
+                clean_stem = extract_clean_stem(f)
+                # Map various normalized versions of the stem
+                lookup[clean_stem] = full_path
+                lookup[clean_stem.lower()] = full_path
+                lookup[f] = full_path
+                lookup[f.lower()] = full_path
 
-    # 4. Try stripping common suffixes like '_label', '_annotation'
-    for suffix in ["_label", "-label", "_annot", "_metadata"]:
-        if j_stem.lower().endswith(suffix):
-            cand = j_stem[:-len(suffix)]
-            if cand in image_index:
-                return image_index[cand]
-            if cand.lower() in image_index:
-                return image_index[cand.lower()]
+    return lookup, raw_files
 
-    # 5. Direct check in images_dir if index missed it
+def get_all_json_files(labels_dir: str):
+    """
+    Finds all .json files inside labels_dir using os.walk (robust against brackets/spaces/unicode).
+    """
+    json_list = []
+    if not labels_dir or not os.path.isdir(labels_dir):
+        return json_list
+
+    for root, _, files in os.walk(labels_dir):
+        for f in files:
+            if f.lower().endswith(".json"):
+                json_list.append(os.path.abspath(os.path.join(root, f)))
+
+    return json_list
+
+def find_matched_image(j_path: str, data: dict, images_lookup: dict, images_dir: str):
+    """
+    Locates the matching image for the json file using clean stem logic:
+    1. Extract name without format extension (e.g. '123' from '123.json')
+    2. Look for that exact name with .jpg inside images
+    3. Check lookup dictionary
+    4. Fallback to image name specified inside JSON metadata
+    """
+    j_filename = os.path.basename(j_path)
+    stem = extract_clean_stem(j_filename)
+
+    # 1. Direct check in images_dir for stem.jpg, stem.JPG, stem.jpeg, stem.png
     if images_dir and os.path.isdir(images_dir):
         for ext in [".jpg", ".JPG", ".jpeg", ".JPEG", ".png", ".PNG"]:
-            cand_p = os.path.join(images_dir, j_stem + ext)
-            if os.path.isfile(cand_p):
-                return cand_p
+            candidate = os.path.join(images_dir, stem + ext)
+            if os.path.isfile(candidate):
+                return candidate
+
+    # 2. Check the fast O(1) lookup dictionary (covers subfolders too)
+    if stem in images_lookup:
+        return images_lookup[stem]
+    if stem.lower() in images_lookup:
+        return images_lookup[stem.lower()]
+
+    # 3. Check inside JSON metadata fields (if image filename is recorded inside json)
+    for field in ["image_name", "filename", "image_path", "image", "file_name"]:
+        val = data.get(field)
+        if isinstance(val, str) and val.strip():
+            base_val = os.path.basename(val)
+            val_stem = extract_clean_stem(base_val)
+            if val_stem in images_lookup:
+                return images_lookup[val_stem]
+            if val_stem.lower() in images_lookup:
+                return images_lookup[val_stem.lower()]
+            if images_dir:
+                cand = os.path.join(images_dir, base_val)
+                if os.path.isfile(cand):
+                    return cand
+
+    # 4. Check nested image objects in json (processed_image, original_image)
+    for parent_key in ["processed_image", "original_image"]:
+        parent_obj = data.get(parent_key)
+        if isinstance(parent_obj, dict):
+            for sub_k in ["name", "filename", "path", "image_name"]:
+                v = parent_obj.get(sub_k)
+                if isinstance(v, str) and v.strip():
+                    v_stem = extract_clean_stem(os.path.basename(v))
+                    if v_stem in images_lookup:
+                        return images_lookup[v_stem]
 
     return None
 
 def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, images_dir: str = None, val_split: float = 0.15):
-    """
-    Prepares dataset by cropping text bounding boxes from matched card images.
-    """
     os.makedirs(config.CROPS_DIR, exist_ok=True)
     os.makedirs(config.DATA_DIR, exist_ok=True)
 
-    labels_dir, images_dir = resolve_directories(data_dir, labels_dir, images_dir)
+    labels_dir, images_dir = resolve_dataset_paths(data_dir, labels_dir, images_dir)
 
-    print(f"[*] Labels directory: {labels_dir}")
-    print(f"[*] Images directory: {images_dir}")
+    print("=" * 65)
+    print("  Lightweight OCR Dataset Extractor (Persian National ID Cards)")
+    print("=" * 65)
+    print(f"[*] Labels Directory : {labels_dir}")
+    print(f"[*] Images Directory : {images_dir}")
 
     if not labels_dir or not os.path.isdir(labels_dir):
-        print(f"[!] Labels directory does not exist: {labels_dir}")
+        print(f"\n[!] Error: Labels directory not found: {labels_dir}")
+        print("    Please check the path to your dataset.")
         return
 
-    # Index all images in images_dir
-    print("[*] Indexing images...")
-    image_index = build_image_index(images_dir)
-    print(f"    -> Found {len(set(image_index.values()))} image files in images directory.")
+    if not images_dir or not os.path.isdir(images_dir):
+        print(f"\n[!] Error: Images directory not found: {images_dir}")
+        print("    Please check the path to your dataset.")
+        return
 
-    # Find all JSON files in labels_dir
-    json_files = glob.glob(os.path.join(labels_dir, "**", "*.json"), recursive=True)
-    print(f"    -> Found {len(json_files)} JSON annotation files.")
+    # Index images
+    print("\n[*] Scanning and indexing images in images directory...")
+    images_lookup, all_images = build_images_lookup(images_dir)
+    print(f"    -> Found {len(all_images)} image files (.jpg / .jpeg / .png).")
+
+    if not all_images:
+        print(f"[!] No valid image files (.jpg, .png) found in: {images_dir}")
+        return
+
+    # Scan json files
+    print("[*] Scanning labels directory for JSON files...")
+    json_files = get_all_json_files(labels_dir)
+    print(f"    -> Found {len(json_files)} JSON label files.")
 
     if not json_files:
-        print(f"[!] No JSON files found in {labels_dir}")
+        print(f"[!] No JSON files found in: {labels_dir}")
         return
+
+    print("\n[*] Matching JSON labels with images and cropping text fields...")
+    print("-" * 65)
 
     samples = []
     crop_counter = 0
-    missing_counter = 0
-    sample_images = list(set(image_index.values()))[:5]
+    missing_count = 0
+    matched_count = 0
 
-    for j_path in json_files:
+    sample_image_names = [os.path.basename(p) for p in all_images[:5]]
+
+    for idx, j_path in enumerate(json_files, 1):
         try:
             with open(j_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            print(f"[!] Failed to parse {j_path}: {e}")
+            print(f"[!] Error reading JSON {os.path.basename(j_path)}: {e}")
             continue
 
-        img_path = find_image_for_json(j_path, data, image_index, images_dir)
+        # Match image
+        img_path = find_matched_image(j_path, data, images_lookup, images_dir)
 
-        if not img_path or not os.path.isfile(img_path):
-            missing_counter += 1
-            if missing_counter <= 3:
-                print(f"[-] Image not found for label: {os.path.basename(j_path)}")
-                if sample_images:
-                    print(f"    (Sample available images: {[os.path.basename(p) for p in sample_images]})")
-            elif missing_counter == 4:
-                print("[-] (Suppressing further missing image messages...)")
+        if not img_path:
+            missing_count += 1
+            if missing_count <= 3:
+                clean_name = extract_clean_stem(os.path.basename(j_path))
+                print(f"[!] Could NOT match image for: {os.path.basename(j_path)}")
+                print(f"    -> Extracted name without format: '{clean_name}'")
+                print(f"    -> Looked for: '{clean_name}.jpg' in {images_dir}")
+                print(f"    -> Sample actual image names in folder: {sample_image_names}")
+            elif missing_count == 4:
+                print("[!] (Suppressing further missing image notifications...)")
             continue
+
+        matched_count += 1
+        if matched_count <= 2:
+            print(f"[OK] Matched: '{os.path.basename(j_path)}' -> '{os.path.basename(img_path)}'")
 
         try:
             with Image.open(img_path) as full_img:
                 img_w, img_h = full_img.size
 
-                # Determine which bbox to use (original vs updated)
+                # Choose bbox matching image resolution
                 processed_info = data.get("processed_image", {})
                 proc_w = processed_info.get("width", 0)
-
-                # If current image resolution matches processed_image, prefer updated_bbox
                 use_updated = (abs(img_w - proc_w) < 50) if proc_w else True
 
                 fields = data.get("fields", [])
-                for idx, field in enumerate(fields):
+                for f_idx, field in enumerate(fields):
                     val = str(field.get("value", "")).strip()
                     if not val:
                         continue
@@ -225,24 +301,25 @@ def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, image
                     if len(points) < 2:
                         continue
 
-                    xs = [p[0] for p in points]
-                    ys = [p[1] for p in points]
+                    # Round coordinate points safely
+                    xs = [int(round(p[0])) for p in points]
+                    ys = [int(round(p[1])) for p in points]
 
                     xmin = min(xs)
                     xmax = max(xs)
                     ymin = min(ys)
                     ymax = max(ys)
 
-                    # Add slight padding around text box
+                    # Add slight padding
                     box_w = xmax - xmin
                     box_h = ymax - ymin
                     pad_x = int(box_w * 0.02)
                     pad_y = int(box_h * 0.05)
 
-                    xmin = max(0, xmin - pad_x)
-                    ymin = max(0, ymin - pad_y)
-                    xmax = min(img_w, xmax + pad_x)
-                    ymax = min(img_h, ymax + pad_y)
+                    xmin = max(0, min(img_w - 1, xmin - pad_x))
+                    xmax = max(xmin + 1, min(img_w, xmax + pad_x))
+                    ymin = max(0, min(img_h - 1, ymin - pad_y))
+                    ymax = max(ymin + 1, min(img_h, ymax + pad_y))
 
                     if xmax <= xmin or ymax <= ymin:
                         continue
@@ -250,28 +327,29 @@ def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, image
                     crop_img = full_img.crop((xmin, ymin, xmax, ymax))
 
                     # Save crop
-                    crop_filename = f"crop_{crop_counter:06d}_{field.get('name', 'field')}.png"
+                    field_name = str(field.get("name", "field")).replace(" ", "_")
+                    crop_filename = f"crop_{crop_counter:06d}_{field_name}.png"
                     crop_filepath = os.path.join(config.CROPS_DIR, crop_filename)
                     crop_img.save(crop_filepath)
 
-                    # Record sample
                     samples.append((crop_filepath, val))
                     crop_counter += 1
 
         except Exception as e:
-            print(f"[!] Error processing {img_path}: {e}")
+            print(f"[!] Error processing image {img_path}: {e}")
 
-    print(f"\n[+] Extraction Summary:")
-    print(f"    - Total JSON files: {len(json_files)}")
-    print(f"    - Successfully processed images: {len(json_files) - missing_counter}")
-    print(f"    - Missing images: {missing_counter}")
-    print(f"    - Total cropped text regions: {len(samples)}")
+    print("-" * 65)
+    print("\n[+] Processing Summary:")
+    print(f"    - Total JSON labels    : {len(json_files)}")
+    print(f"    - Successfully matched : {matched_count}")
+    print(f"    - Missing images       : {missing_count}")
+    print(f"    - Total text crops     : {len(samples)}")
 
     if not samples:
-        print("[!] No text samples could be extracted.")
+        print("\n[!] No text crops were generated. Please inspect the logs above.")
         return
 
-    # Shuffle and split into train / val
+    # Shuffle and split train / val
     random.seed(42)
     random.shuffle(samples)
 
@@ -283,30 +361,29 @@ def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, image
         train_samples = samples
         val_samples = []
 
-    # Write train.txt
     with open(config.TRAIN_LABEL_FILE, "w", encoding="utf-8") as f:
         for p, label in train_samples:
             f.write(f"{p}\t{label}\n")
 
-    # Write val.txt
     with open(config.VAL_LABEL_FILE, "w", encoding="utf-8") as f:
         for p, label in val_samples:
             f.write(f"{p}\t{label}\n")
 
-    print(f"[+] Saved {len(train_samples)} training samples to: {config.TRAIN_LABEL_FILE}")
-    print(f"[+] Saved {len(val_samples)} validation samples to: {config.VAL_LABEL_FILE}")
+    print(f"\n[+] Saved {len(train_samples)} training samples to   : {config.TRAIN_LABEL_FILE}")
+    print(f"[+] Saved {len(val_samples)} validation samples to : {config.VAL_LABEL_FILE}")
+    print("=" * 65)
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Crop dataset fields for lightweight OCR training")
-    parser.add_argument("--data_dir", type=str, default=None, help="Root dataset folder containing 'labels' and 'images' folders")
+    parser.add_argument("--data_dir", type=str, default=None, help="Root folder containing 'labels' and 'images' subdirectories")
     parser.add_argument("--labels_dir", type=str, default=None, help="Explicit path to labels folder")
     parser.add_argument("--images_dir", type=str, default=None, help="Explicit path to images folder")
     parser.add_argument("--val_split", type=float, default=0.15, help="Validation set ratio (default 0.15)")
     args = parser.parse_args()
 
     if not args.data_dir and not args.labels_dir:
-        parser.error("Please specify either --data_dir or --labels_dir")
+        parser.error("Please specify --data_dir (or --labels_dir and --images_dir)")
 
     crop_fields_from_dataset(
         data_dir=args.data_dir,
