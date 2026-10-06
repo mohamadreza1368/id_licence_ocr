@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Checkpoints and models
+checkpoints/
+*.pth
+*.pt
+*.onnx
+
+# Data and crops
+data/
+*.png
+*.jpg
+*.jpeg
+*.bmp
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
