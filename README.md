@@ -49,10 +49,32 @@ python train.py --mlflow_uri "http://172.16.101.42:8082" --experiment_name "my_e
 python train.py --no_mlflow
 ```
 
+**اجرا در پس‌زمینه با nohup (مخصوص سرور لینوکس یا اجرای بلندمدت):**
+برای اینکه با بستن ترمینال یا قطع اتصال SSH فرایند آموزش متوقف نشود:
+```bash
+# روش مستقیم با دستور nohup (حالت unbuffered برای نوشتن فوری لاگ):
+nohup python -u train.py > train.log 2>&1 &
+
+# مشاهده لحظه‌ای خروجی و لاگ‌ها:
+tail -f train.log
+
+# یا اجرای اسکریپت آماده:
+bash run_nohup.sh
+```
+
+**اجرا در پس‌زمینه در ویندوز (PowerShell):**
+```powershell
+.\run_background.ps1
+
+# مشاهده لاگ در ویندوز:
+Get-Content train.log -Wait
+```
+
 **موارد ثبت شده در MLflow:**
 * **پارامترها (Parameters):** ابعاد تصویر، نرخ یادگیری، اندازه بچ، تعداد پارامترهای مدل، حجم مدل، تنظیمات CTC
 * **متریک‌ها در هر Epoch (Metrics):** مقدار `train_loss`، `val_loss`، دقت ترتیبی کلمه `val_seq_acc`، دقت کاراکتر `val_char_acc`، زمان هر Epoch و مقدار Learning Rate
 * **آرتیفکت‌ها و خروجی‌ها (Artifacts):** وزن‌های بهترین مدل (`best_mobile_ocr.pth`)، مدل خروجی موبایل (`model_mobile.pt`)، فایل دیکشنری حروف (`vocab.txt`) و گزارش نمونه خروجی‌های مدل (`sample_predictions.txt`)
+
 
 
 ### گام سوم: خروجی برای موبایل و دستگاه‌های سبک

@@ -53,13 +53,15 @@ def evaluate(model, val_loader, converter, criterion, device, epoch=None, total_
     all_preds = []
     all_targets = []
 
+    is_tty = sys.stdout.isatty()
     desc = f"Epoch [{epoch:02d}/{total_epochs:02d}] Evaluating" if epoch and total_epochs else "Evaluating"
     val_pbar = tqdm(
         val_loader,
         desc=desc,
         unit="batch",
         leave=False,
-        dynamic_ncols=True
+        dynamic_ncols=True,
+        mininterval=0.2 if is_tty else 5.0
     )
 
     with torch.no_grad():
@@ -255,13 +257,15 @@ def train(
 
         current_lr = optimizer.param_groups[0]["lr"]
 
+        is_tty = sys.stdout.isatty()
         # Rich interactive progress bar for training
         train_pbar = tqdm(
             train_loader,
             desc=f"Epoch [{epoch:02d}/{epochs:02d}] Training",
             unit="batch",
             leave=True,
-            dynamic_ncols=True
+            dynamic_ncols=True,
+            mininterval=0.2 if is_tty else 5.0
         )
 
         for batch_idx, (images, targets, input_lengths, target_lengths, _) in enumerate(train_pbar):
