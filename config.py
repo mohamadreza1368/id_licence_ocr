@@ -33,3 +33,9 @@ SPECIAL_CHARS = " /-.:"
 
 # All characters in vocab (CTC blank token will be prepended at index 0)
 ALL_CHARS = PERSIAN_CHARS + PERSIAN_DIGITS + ENGLISH_DIGITS + SPECIAL_CHARS
+
+# MLflow Configuration
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://172.16.101.42:8082")
+MLFLOW_EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "iranian_id_card_ocr")
+MLFLOW_ENABLE = True
+

@@ -33,12 +33,27 @@ python prepare_dataset.py --labels_dir "D:/path/to/labels" --images_dir "D:/path
 ```
 این اسکریپت تمام عکس‌ها را ایندکس کرده، فایل‌های JSON مربوطه را تطبیق می‌دهد و فیلدها (`BirthDate`، کد ملی، نام و...) را بر اساس مختصات `updated_bbox` برش زده و در `data/crops/` ذخیره می‌کند.
 
-### گام دوم: اجرای آموزش (Training)
-برای شروع آموزش مدل:
+### گام دوم: اجرای آموزش (Training) به همراه لاگ در MLflow
+برای شروع آموزش مدل و ثبت تمام متریک‌ها و پارامترها در سرور MLflow:
 ```bash
 python train.py
 ```
-مدل روی CPU یا GPU شروع به یادگیری فونت‌ها و ارقام کارت ملی می‌کند و بهترین وزن‌ها در `checkpoints/best_mobile_ocr.pth` ذخیره می‌شود.
+به صورت پیش‌فرض، آدرس سرور `http://172.16.101.42:8082` و نام اکسپریمنت `iranian_id_card_ocr` است.
+
+**تنظیمات پیشرفته اختیاری:**
+```bash
+# تغییر آدرس سرور MLflow، تعداد Epochs یا نام Run
+python train.py --mlflow_uri "http://172.16.101.42:8082" --experiment_name "my_experiment" --run_name "run_v1" --epochs 40 --batch_size 32
+
+# غیرفعال کردن موقت لاگ در MLflow (اجرای آفلاین)
+python train.py --no_mlflow
+```
+
+**موارد ثبت شده در MLflow:**
+* **پارامترها (Parameters):** ابعاد تصویر، نرخ یادگیری، اندازه بچ، تعداد پارامترهای مدل، حجم مدل، تنظیمات CTC
+* **متریک‌ها در هر Epoch (Metrics):** مقدار `train_loss`، `val_loss`، دقت ترتیبی کلمه `val_seq_acc`، دقت کاراکتر `val_char_acc`، زمان هر Epoch و مقدار Learning Rate
+* **آرتیفکت‌ها و خروجی‌ها (Artifacts):** وزن‌های بهترین مدل (`best_mobile_ocr.pth`)، مدل خروجی موبایل (`model_mobile.pt`)، فایل دیکشنری حروف (`vocab.txt`) و گزارش نمونه خروجی‌های مدل (`sample_predictions.txt`)
+
 
 ### گام سوم: خروجی برای موبایل و دستگاه‌های سبک
 برای تبدیل مدل آموزش‌دیده به فرمت بهینه موبایل:
