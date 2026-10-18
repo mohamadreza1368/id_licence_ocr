@@ -20,12 +20,11 @@ class PersianOCRDataset(Dataset):
                         continue
                     parts = line.split("\t")
                     if len(parts) >= 2:
-                        img_path = parts[0]
-                        label = parts[1]
-                        if os.path.exists(img_path):
-                            self.samples.append((img_path, label))
+                        img_path = parts[0].strip()
+                        label = parts[1].strip()
+                        self.samples.append((img_path, label))
 
-        print(f"Loaded {len(self.samples)} samples from {label_file}")
+        print(f"[*] Loaded {len(self.samples)} samples from: {os.path.basename(label_file)}")
 
     def __len__(self):
         return len(self.samples)
@@ -49,10 +48,14 @@ class PersianOCRDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, label = self.samples[idx]
-        with Image.open(img_path) as img:
-            img = img.convert("RGB")
-            img_tensor = self.preprocess_image(img)
-        return img_tensor, label
+        try:
+            with Image.open(img_path) as img:
+                img = img.convert("RGB")
+                img_tensor = self.preprocess_image(img)
+            return img_tensor, label
+        except Exception:
+            blank = Image.new("RGB", (config.MIN_WIDTH, config.IMG_HEIGHT), color=(255, 255, 255))
+            return self.preprocess_image(blank), label
 
 
 def ocr_collate_fn(batch, converter: CTCLabelConverter):

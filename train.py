@@ -3,11 +3,16 @@ import sys
 import time
 import datetime
 import argparse
+import socket
+import urllib.parse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from functools import partial
+from tqdm import tqdm
 
+# Configure environment and encoding
+os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -42,14 +47,23 @@ def compute_accuracy(preds, targets):
     char_acc = char_matches / max(total_chars, 1)
     return seq_acc, char_acc
 
-def evaluate(model, val_loader, converter, criterion, device):
+def evaluate(model, val_loader, converter, criterion, device, epoch=None, total_epochs=None):
     model.eval()
     val_loss = 0.0
     all_preds = []
     all_targets = []
 
+    desc = f"Epoch [{epoch:02d}/{total_epochs:02d}] Evaluating" if epoch and total_epochs else "Evaluating"
+    val_pbar = tqdm(
+        val_loader,
+        desc=desc,
+        unit="batch",
+        leave=False,
+        dynamic_ncols=True
+    )
+
     with torch.no_grad():
-        for images, targets, input_lengths, target_lengths, raw_labels in val_loader:
+        for images, targets, input_lengths, target_lengths, raw_labels in val_pbar:
             images = images.to(device)
             targets = targets.to(device)
 
@@ -65,21 +79,47 @@ def evaluate(model, val_loader, converter, criterion, device):
             all_preds.extend(decoded_texts)
             all_targets.extend(raw_labels)
 
+            current_avg_loss = val_loss / max(len(all_targets) // max(images.size(0), 1), 1)
+            val_pbar.set_postfix({"eval_loss": f"{loss.item():.4f}"})
+
     avg_loss = val_loss / max(len(val_loader), 1)
     seq_acc, char_acc = compute_accuracy(all_preds, all_targets)
     return avg_loss, seq_acc, char_acc, all_preds, all_targets
+
+def check_server_reachable(uri: str, timeout: float = 2.0) -> bool:
+    """
+    Quick non-blocking socket check to see if remote MLflow server is reachable.
+    """
+    try:
+        if not uri.startswith("http://") and not uri.startswith("https://"):
+            uri = f"http://{uri}"
+        parsed = urllib.parse.urlparse(uri)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((host, port))
+        s.close()
+        return True
+    except Exception:
+        return False
 
 def init_mlflow_tracker(tracking_uri: str, experiment_name: str, run_name: str = None):
     """
     Safely initializes MLflow tracking with the remote server.
     Returns (mlflow_module, active_run) or (None, None) if unavailable.
     """
+    if not tracking_uri.startswith("http://") and not tracking_uri.startswith("https://"):
+        tracking_uri = f"http://{tracking_uri}"
+
+    print(f"[*] Checking MLflow server at: {tracking_uri} ...")
+    if not check_server_reachable(tracking_uri, timeout=2.0):
+        print(f"[!] Note: Server at {tracking_uri} is not reachable right now.")
+        print("    --> Training will run locally without remote MLflow logging.")
+        return None, None
+
     try:
         import mlflow
-        # Ensure URI starts with http:// if not specified
-        if not tracking_uri.startswith("http://") and not tracking_uri.startswith("https://"):
-            tracking_uri = f"http://{tracking_uri}"
-
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
 
@@ -88,18 +128,17 @@ def init_mlflow_tracker(tracking_uri: str, experiment_name: str, run_name: str =
             run_name = f"mobile_ocr_{timestamp}"
 
         active_run = mlflow.start_run(run_name=run_name)
-        print(f"[+] MLflow Connected Successfully!")
-        print(f"    - Tracking Server : {tracking_uri}")
-        print(f"    - Experiment Name : {experiment_name}")
-        print(f"    - Run Name        : {active_run.info.run_name}")
-        print(f"    - Run ID          : {active_run.info.run_id}")
+        print(f"[+] Connected to MLflow Tracking Server successfully!")
+        print(f"    - Server URI : {tracking_uri}")
+        print(f"    - Experiment : {experiment_name}")
+        print(f"    - Run Name   : {active_run.info.run_name}")
         return mlflow, active_run
     except ImportError:
-        print("[!] Warning: 'mlflow' package is not installed. Run 'pip install mlflow' to enable tracking.")
+        print("[!] Warning: 'mlflow' package is not installed. Continuing locally.")
         return None, None
     except Exception as e:
-        print(f"[!] Warning: Could not connect to MLflow server at {tracking_uri}: {e}")
-        print("    --> Training will continue locally without MLflow logging.")
+        print(f"[!] Warning: Could not initialize MLflow run: {e}")
+        print("    --> Training will proceed locally.")
         return None, None
 
 def train(
@@ -113,18 +152,20 @@ def train(
 ):
     os.makedirs(config.CHECKPOINTS_DIR, exist_ok=True)
     device = torch.device(config.DEVICE)
-    print("=" * 65)
-    print("  Iranian National ID Card OCR - Lightweight Training")
-    print("=" * 65)
-    print(f"[*] Device: {device}")
-    print(f"[*] Hyperparameters: Epochs={epochs}, BatchSize={batch_size}, LR={lr}")
+    print("=" * 70)
+    print("  Iranian National ID Card OCR - Mobile-Ready Training")
+    print("=" * 70)
+    print(f"[*] Compute Device     : {device} ({'GPU Acceleration' if device.type == 'cuda' else 'CPU Mode'})")
+    print(f"[*] Hyperparameters    : Epochs={epochs} | BatchSize={batch_size} | LearningRate={lr}")
 
     # Datasets
+    print("\n[*] Loading dataset files...")
     train_dataset = PersianOCRDataset(config.TRAIN_LABEL_FILE, is_train=True)
     val_dataset = PersianOCRDataset(config.VAL_LABEL_FILE, is_train=False)
 
     if len(train_dataset) == 0:
-        print("[!] Error: Train dataset is empty. Run prepare_dataset.py first!")
+        print("\n[!] Error: Train dataset is empty!")
+        print("    Please run: python prepare_dataset.py --data_dir \"path/to/dataset\" first.")
         return
 
     if len(val_dataset) == 0:
@@ -132,8 +173,6 @@ def train(
         val_dataset = train_dataset
 
     converter = CTCLabelConverter(config.ALL_CHARS)
-    print(f"[*] Vocabulary size (including CTC blank): {converter.num_classes}")
-
     collate = partial(ocr_collate_fn, converter=converter)
 
     train_loader = DataLoader(
@@ -153,19 +192,24 @@ def train(
         num_workers=0
     )
 
+    print(f"[*] Total Train Samples: {len(train_dataset):,} ({len(train_loader)} batches)")
+    print(f"[*] Total Val Samples  : {len(val_dataset):,} ({len(val_loader)} batches)")
+    print(f"[*] Vocabulary Size    : {converter.num_classes} characters (including CTC blank)")
+
     # Initialize model
     model = MobileOCRNet(num_classes=converter.num_classes).to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model_size_mb = total_params * 4 / (1024 * 1024)
-    print(f"[*] MobileOCRNet initialized. Trainable parameters: {total_params:,} ({model_size_mb:.2f} MB)")
+    print(f"[*] Model Architecture : MobileOCRNet (~{model_size_mb:.2f} MB, {total_params:,} parameters)")
 
     criterion = nn.CTCLoss(blank=converter.blank_idx, zero_infinity=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=config.WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
-    # Initialize MLflow if requested
+    # Initialize MLflow
     mlflow_module = None
     if use_mlflow:
+        print("")
         mlflow_module, _ = init_mlflow_tracker(
             tracking_uri=mlflow_uri,
             experiment_name=experiment_name,
@@ -186,8 +230,8 @@ def train(
                     "max_width": config.MAX_WIDTH,
                     "device": str(device),
                     "vocab_size": converter.num_classes,
-                    "train_samples_count": len(train_dataset),
-                    "val_samples_count": len(val_dataset),
+                    "train_samples": len(train_dataset),
+                    "val_samples": len(val_dataset),
                     "optimizer": "AdamW",
                     "scheduler": "CosineAnnealingLR"
                 })
@@ -200,15 +244,27 @@ def train(
     last_sample_preds = []
     last_sample_gts = []
 
-    print("\n[*] Starting training loop...")
-    print("-" * 65)
+    print("\n" + "=" * 70)
+    print("  Starting Training Loop")
+    print("=" * 70)
 
     for epoch in range(1, epochs + 1):
-        start_time = time.time()
+        epoch_start = time.time()
         model.train()
         train_loss = 0.0
 
-        for batch_idx, (images, targets, input_lengths, target_lengths, _) in enumerate(train_loader):
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        # Rich interactive progress bar for training
+        train_pbar = tqdm(
+            train_loader,
+            desc=f"Epoch [{epoch:02d}/{epochs:02d}] Training",
+            unit="batch",
+            leave=True,
+            dynamic_ncols=True
+        )
+
+        for batch_idx, (images, targets, input_lengths, target_lengths, _) in enumerate(train_pbar):
             images = images.to(device)
             targets = targets.to(device)
 
@@ -224,28 +280,43 @@ def train(
             optimizer.step()
 
             train_loss += loss.item()
+            running_avg = train_loss / (batch_idx + 1)
 
-        current_lr = optimizer.param_groups[0]["lr"]
+            # Update live metrics on the progress bar
+            train_pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "avg_loss": f"{running_avg:.4f}",
+                "lr": f"{current_lr:.6f}"
+            })
+
         scheduler.step()
         train_loss = train_loss / max(len(train_loader), 1)
 
-        # Validation
+        # Evaluation phase with progress bar
         val_loss, seq_acc, char_acc, sample_preds, sample_gts = evaluate(
-            model, val_loader, converter, criterion, device
+            model=model,
+            val_loader=val_loader,
+            converter=converter,
+            criterion=criterion,
+            device=device,
+            epoch=epoch,
+            total_epochs=epochs
         )
         last_sample_preds = sample_preds
         last_sample_gts = sample_gts
-        elapsed = time.time() - start_time
+        elapsed = time.time() - epoch_start
 
-        print(f"Epoch [{epoch:02d}/{epochs:02d}] ({elapsed:.1f}s) | "
-              f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Seq Acc: {seq_acc * 100:.2f}% | Char Acc: {char_acc * 100:.2f}% | "
-              f"LR: {current_lr:.6f}")
+        # Print structured Epoch Summary
+        print(f"\n>> Epoch [{epoch:02d}/{epochs:02d}] Summary ({elapsed:.1f}s):")
+        print(f"   Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        print(f"   Seq Accuracy (Exact Match): {seq_acc * 100:.2f}% | Char Accuracy: {char_acc * 100:.2f}%")
 
-        # Sample comparison
-        if len(sample_preds) > 0 and (epoch % 5 == 0 or epoch == epochs):
+        # Show sample prediction vs ground truth
+        if len(sample_preds) > 0 and (epoch % 2 == 0 or epoch == 1 or epoch == epochs):
+            print("   Sample Outputs:")
             for s_idx in range(min(3, len(sample_preds))):
-                print(f"    Sample #{s_idx + 1} -> GT: '{sample_gts[s_idx]}' | Pred: '{sample_preds[s_idx]}'")
+                matched_tag = "[MATCH]" if sample_gts[s_idx] == sample_preds[s_idx] else "[DIFF]"
+                print(f"     #{s_idx + 1} {matched_tag} GT: '{sample_gts[s_idx]}' | Pred: '{sample_preds[s_idx]}'")
 
         # MLflow epoch metrics logging
         if mlflow_module:
@@ -273,27 +344,30 @@ def train(
                 'char_acc': char_acc,
                 'vocab': converter.character
             }, best_model_path)
-            print(f"    --> Saved best model checkpoint to {best_model_path}")
+            print(f"   --> [NEW BEST] Checkpoint saved: {best_model_path} (Acc: {best_val_acc * 100:.2f}%)")
 
-    print("-" * 65)
-    print(f"[+] Training complete!")
-    print(f"    - Best Validation Sequence Accuracy : {best_val_acc * 100:.2f}%")
-    print(f"    - Best Validation Character Accuracy: {best_char_acc * 100:.2f}%")
+        print("-" * 70)
+
+    print("\n" + "=" * 70)
+    print("  Training Completed Successfully!")
+    print(f"  - Best Validation Sequence Accuracy : {best_val_acc * 100:.2f}%")
+    print(f"  - Best Validation Character Accuracy: {best_char_acc * 100:.2f}%")
+    print("=" * 70)
 
     # Post-training MLflow artifact logging and export
     if mlflow_module:
         try:
-            print("\n[*] Uploading model artifacts and metrics to MLflow...")
+            print("\n[*] Uploading artifacts and model files to MLflow server...")
             mlflow_module.log_metrics({
                 "best_val_seq_acc": best_val_acc,
                 "best_val_char_acc": best_char_acc
             })
 
-            # 1. Log best PyTorch checkpoint
+            # 1. Log checkpoint
             if os.path.exists(best_model_path):
                 mlflow_module.log_artifact(best_model_path, artifact_path="checkpoints")
 
-            # 2. Export and log mobile models (TorchScript & ONNX)
+            # 2. Export and log mobile models
             try:
                 from export_model import export_models
                 export_models(best_model_path)
@@ -308,7 +382,7 @@ def train(
                 if os.path.exists(onnx_file):
                     mlflow_module.log_artifact(onnx_file, artifact_path="mobile_deployment")
             except Exception as e:
-                print(f"[!] Note: Automatic mobile export encountered: {e}")
+                print(f"[!] Note: Mobile export info: {e}")
 
             # 3. Log sample predictions report
             if last_sample_preds:
@@ -322,14 +396,14 @@ def train(
                 mlflow_module.log_artifact(samples_report, artifact_path="reports")
 
             mlflow_module.end_run()
-            print(f"[+] MLflow run successfully finalized and closed.")
+            print("[+] MLflow run successfully finalized.")
         except Exception as e:
             print(f"[!] Warning: Error finalizing MLflow run: {e}")
 
-    print("=" * 65)
+    print("=" * 70)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train lightweight Persian OCR model with MLflow tracking")
+    parser = argparse.ArgumentParser(description="Train lightweight Persian OCR model with live progress & MLflow")
     parser.add_argument("--epochs", type=int, default=config.NUM_EPOCHS, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=config.BATCH_SIZE, help="Batch size")
     parser.add_argument("--lr", type=float, default=config.LEARNING_RATE, help="Learning rate")
