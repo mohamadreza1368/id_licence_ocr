@@ -84,12 +84,23 @@ python export_model.py
 ```
 خروجی `model_mobile.pt` (حجم ~ ۴ مگابایت) برای استفاده در اپلیکیشن‌های اندروید و iOS با سرعت آنی آماده است.
 
-### گام چهارم: تست و استخراج اطلاعات
-برای تست خواندن اطلاعات یک کارت جدید:
-```bash
-python infer.py --image "path/to/card.png" --json "path/to/card.json"
-```
-یا برای تست روی تک‌تصویر کراپ‌شده یک فیلد:
-```bash
-python infer.py --image "data/crops/sample.png"
-```
+### گام چهارم: استخراج خودکار از کل عکس دوربین موبایل (پایپ‌لاین کامل End-to-End)
+برای اینکه کاربر بتواند یک عکس کامل از دوربین موبایل بدهد (بدون نیاز به دانستن محل کادرها یا کراپ قبلی):
+
+1. **تبدیل دیتای فعلی شما به فرمت دیتکتور:**
+   ```bash
+   python prepare_detector_data.py --data_dir "مسیر_دایرکتوری_دیتای_شما"
+   ```
+   این اسکریپت برچسب‌های `updated_bbox` تمام فیلدها را به فرمت استاندارد دیتکشن تبدیل کرده و فایل `detector_data/dataset.yaml` را می‌سازد.
+
+2. **آموزش دیتکتور فوق‌سبک فیلدها (YOLO-Nano ~3MB):**
+   ```bash
+   python train_detector.py --epochs 30 --batch_size 16
+   ```
+
+3. **اجرای استخراج آنی روی هر عکس دوربین موبایل:**
+   ```bash
+   python pipeline.py --image "mobile_photo.jpg" --output "annotated_card.jpg"
+   ```
+   این دستور به طور خودکار فیلدهای کارت (`BirthDate`, `NationalID`, `FirstName` و...) را از روی کل عکس پیدا کرده، برش می‌زند، متن آن‌ها را می‌خواند و ساختار JSON نهایی را خروجی می‌دهد.
+
