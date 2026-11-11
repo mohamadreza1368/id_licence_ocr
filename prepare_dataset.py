@@ -48,6 +48,78 @@ def find_subfolder(parent: str, candidates: list):
         pass
     return None
 
+def extract_field_points(field: dict):
+    """
+    Extracts coordinate points from various bounding box representations:
+      1. Direct list of points: field["bbox"] = [[x1, y1], [x2, y2], ...]
+      2. Object with points: field["updated_bbox"]["points"] or field["original_bbox"]["points"]
+      3. Object with bbox points: field["bbox"]["points"]
+      4. Single rect [xmin, ymin, xmax, ymax]
+    Returns list of [x, y] points, or None if invalid/empty.
+    """
+    if not isinstance(field, dict):
+        return None
+
+    # Check direct 'bbox' key
+    bbox = field.get("bbox")
+    if isinstance(bbox, list) and len(bbox) >= 2:
+        if all(isinstance(p, (list, tuple)) and len(p) >= 2 for p in bbox):
+            return bbox
+        if len(bbox) == 4 and all(isinstance(x, (int, float)) for x in bbox):
+            xmin, ymin, xmax, ymax = bbox
+            return [[xmin, ymin], [xmax, ymin], [xmin, ymax], [xmax, ymax]]
+
+    if isinstance(bbox, dict) and "points" in bbox:
+        pts = bbox["points"]
+        if isinstance(pts, list) and len(pts) >= 2:
+            return pts
+
+    # Check updated_bbox or original_bbox
+    for key in ["updated_bbox", "original_bbox"]:
+        box_obj = field.get(key)
+        if isinstance(box_obj, dict) and "points" in box_obj:
+            pts = box_obj["points"]
+            if isinstance(pts, list) and len(pts) >= 2:
+                return pts
+        elif isinstance(box_obj, list) and len(box_obj) >= 2:
+            if all(isinstance(p, (list, tuple)) and len(p) >= 2 for p in box_obj):
+                return box_obj
+
+    return None
+
+def get_coordinate_reference(data: dict, img_w: int, img_h: int):
+    """
+    Determines the reference coordinate dimensions (ref_w, ref_h)
+    used in the JSON annotation.
+    """
+    proc_info = data.get("processed_image", {})
+    orig_info = data.get("original_image", {})
+
+    pw = proc_info.get("width", 0) if isinstance(proc_info, dict) else 0
+    ph = proc_info.get("height", 0) if isinstance(proc_info, dict) else 0
+
+    ow = orig_info.get("width", 0) if isinstance(orig_info, dict) else 0
+    oh = orig_info.get("height", 0) if isinstance(orig_info, dict) else 0
+
+    max_x, max_y = 0, 0
+    for fld in data.get("fields", []):
+        pts = extract_field_points(fld)
+        if pts:
+            for p in pts:
+                max_x = max(max_x, p[0])
+                max_y = max(max_y, p[1])
+
+    # If coordinates are clearly within processed_image bounds:
+    if pw > 0 and ph > 0 and max_x <= pw * 1.05 and max_y <= ph * 1.05:
+        return pw, ph
+
+    # If coordinates match original_image bounds:
+    if ow > 0 and oh > 0 and max_x <= ow * 1.05 and max_y <= oh * 1.05:
+        return ow, oh
+
+    # Fallback to actual image dimensions
+    return img_w, img_h
+
 def resolve_dataset_paths(data_dir: str = None, labels_dir: str = None, images_dir: str = None):
     """
     Resolves the exact paths for labels_dir and images_dir.
@@ -274,36 +346,27 @@ def crop_fields_from_dataset(data_dir: str = None, labels_dir: str = None, image
             with Image.open(img_path) as full_img:
                 img_w, img_h = full_img.size
 
-                # Choose bbox matching image resolution
-                processed_info = data.get("processed_image", {})
-                proc_w = processed_info.get("width", 0)
-                use_updated = (abs(img_w - proc_w) < 50) if proc_w else True
+                ref_w, ref_h = get_coordinate_reference(data, img_w, img_h)
+                scale_x = img_w / float(ref_w) if ref_w > 0 else 1.0
+                scale_y = img_h / float(ref_h) if ref_h > 0 else 1.0
 
                 fields = data.get("fields", [])
                 for f_idx, field in enumerate(fields):
-                    val = str(field.get("value", "")).strip()
-                    if not val:
+                    val = field.get("value")
+                    if val is None:
+                        continue
+                    val = str(val).strip()
+                    if not val or val.lower() in ("none", "null"):
                         continue
 
-                    # Select bbox
-                    bbox_data = None
-                    if use_updated and "updated_bbox" in field:
-                        bbox_data = field["updated_bbox"]
-                    elif "original_bbox" in field:
-                        bbox_data = field["original_bbox"]
-                    elif "updated_bbox" in field:
-                        bbox_data = field["updated_bbox"]
-
-                    if not bbox_data or "points" not in bbox_data:
+                    # Extract bbox points from any supported format
+                    points = extract_field_points(field)
+                    if not points or len(points) < 2:
                         continue
 
-                    points = bbox_data["points"]
-                    if len(points) < 2:
-                        continue
-
-                    # Round coordinate points safely
-                    xs = [int(round(p[0])) for p in points]
-                    ys = [int(round(p[1])) for p in points]
+                    # Round coordinate points safely and scale to image dimensions
+                    xs = [int(round(p[0] * scale_x)) for p in points]
+                    ys = [int(round(p[1] * scale_y)) for p in points]
 
                     xmin = min(xs)
                     xmax = max(xs)

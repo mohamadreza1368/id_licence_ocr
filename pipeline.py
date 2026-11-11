@@ -125,7 +125,10 @@ class FullCardOCRScanner:
                 crop_ymax = min(img_h, ymax + pad_y)
 
                 crop = full_img.crop((crop_xmin, crop_ymin, crop_xmax, crop_ymax))
-                recognized_text = self.ocr_engine.read_crop(crop)
+                if fname.lower() in ("image", "photo", "face", "avatar", "portrait"):
+                    recognized_text = "[Card Portrait / Image]"
+                else:
+                    recognized_text = self.ocr_engine.read_crop(crop)
 
                 # Validation
                 is_valid = None

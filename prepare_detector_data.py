@@ -11,34 +11,16 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-VALID_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
-def extract_clean_stem(filename: str) -> str:
-    stem = filename
-    if stem.lower().endswith(".json"):
-        stem = stem[:-5]
-    for ext in VALID_IMG_EXTS:
-        if stem.lower().endswith(ext):
-            stem = stem[:-len(ext)]
-            break
-    return stem.strip()
-
-def build_images_lookup(images_dir: str):
-    lookup = {}
-    if not images_dir or not os.path.isdir(images_dir):
-        return lookup
-
-    for root, _, files in os.walk(images_dir):
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in VALID_IMG_EXTS:
-                full_path = os.path.abspath(os.path.join(root, f))
-                clean_stem = extract_clean_stem(f)
-                lookup[clean_stem] = full_path
-                lookup[clean_stem.lower()] = full_path
-                lookup[f] = full_path
-                lookup[f.lower()] = full_path
-    return lookup
+from prepare_dataset import (
+    VALID_IMG_EXTS,
+    extract_clean_stem,
+    extract_field_points,
+    get_coordinate_reference,
+    build_images_lookup,
+    get_all_json_files,
+    find_matched_image,
+    resolve_dataset_paths,
+)
 
 def convert_to_yolo_format(
     labels_dir: str,
@@ -72,23 +54,26 @@ def convert_to_yolo_format(
     print(f"[*] Images Directory : {images_dir}")
     print(f"[*] Output Directory : {output_dir}")
 
-    # Build image lookup index
-    images_lookup = build_images_lookup(images_dir)
-    print(f"[*] Found {len(set(images_lookup.values()))} card images.")
+    # Build image lookup index using exact stem-first logic
+    print("\n[*] Scanning and indexing card images in images directory...")
+    images_lookup, all_images = build_images_lookup(images_dir)
+    print(f"    -> Found {len(all_images)} card images (.jpg / .jpeg / .png).")
+
+    if not all_images:
+        print(f"[!] Error: No valid image files (.jpg, .png) found in: {images_dir}")
+        return
 
     # Collect JSON files
-    json_files = []
-    for root, _, files in os.walk(labels_dir):
-        for f in files:
-            if f.lower().endswith(".json"):
-                json_files.append(os.path.join(root, f))
+    print("[*] Scanning labels directory for JSON files...")
+    json_files = get_all_json_files(labels_dir)
+    print(f"    -> Found {len(json_files)} JSON annotation files.")
 
-    print(f"[*] Found {len(json_files)} JSON annotation files.")
     if not json_files:
-        print("[!] No JSON files found.")
+        print(f"[!] Error: No JSON files found in: {labels_dir}")
         return
 
     # Pass 1: Discover all unique field classes dynamically
+    print("\n[*] Pass 1: Discovering field classes...")
     class_set = set()
     for j_path in json_files:
         try:
@@ -96,19 +81,29 @@ def convert_to_yolo_format(
                 data = json.load(f)
             for fld in data.get("fields", []):
                 name = str(fld.get("name", "")).strip()
-                if name:
+                pts = extract_field_points(fld)
+                # Only include fields with valid bounding box coordinates (skips metadata like image_path with empty bbox)
+                if name and pts and len(pts) >= 2:
                     class_set.add(name)
         except Exception:
             pass
 
     class_names = sorted(list(class_set))
     class_to_id = {name: i for i, name in enumerate(class_names)}
-    print(f"[*] Discovered {len(class_names)} field classes:")
+    print(f"[+] Discovered {len(class_names)} valid detection classes:")
     for idx, name in enumerate(class_names):
         print(f"    - Class {idx}: '{name}'")
 
+    if not class_names:
+        print("[!] Error: No fields with valid bounding boxes found in any JSON label file.")
+        return
+
     # Pass 2: Pair images, calculate normalized bboxes, and write YOLO labels
+    print("\n[*] Pass 2: Matching JSON labels with images & calculating bounding boxes...")
     records = []
+    missing_count = 0
+    sample_image_names = [os.path.basename(p) for p in all_images[:5]]
+
     for j_path in json_files:
         try:
             with open(j_path, "r", encoding="utf-8") as f:
@@ -116,29 +111,27 @@ def convert_to_yolo_format(
         except Exception:
             continue
 
-        j_stem = extract_clean_stem(os.path.basename(j_path))
-        img_path = images_lookup.get(j_stem) or images_lookup.get(j_stem.lower())
-        if not img_path:
-            # Check inside JSON fields
-            for k in ["image_name", "filename", "image_path", "image"]:
-                v = data.get(k)
-                if isinstance(v, str) and v.strip():
-                    img_path = images_lookup.get(extract_clean_stem(os.path.basename(v)))
-                    if img_path:
-                        break
-
+        # Match corresponding card image using clean stem (.jpg priority)
+        img_path = find_matched_image(j_path, data, images_lookup, images_dir)
         if not img_path or not os.path.isfile(img_path):
+            missing_count += 1
+            if missing_count <= 3:
+                clean_name = extract_clean_stem(os.path.basename(j_path))
+                print(f"[!] Could NOT match image for: {os.path.basename(j_path)}")
+                print(f"    -> Extracted name without format: '{clean_name}'")
+                print(f"    -> Looked for: '{clean_name}.jpg' in {images_dir}")
+                print(f"    -> Sample actual image names in folder: {sample_image_names}")
+            elif missing_count == 4:
+                print("[!] (Suppressing further missing image notifications...)")
             continue
 
         try:
             with Image.open(img_path) as im:
                 img_w, img_h = im.size
 
-            use_updated = True
-            proc_info = data.get("processed_image", {})
-            if proc_info:
-                pw = proc_info.get("width", 0)
-                use_updated = (abs(img_w - pw) < 50)
+            ref_w, ref_h = get_coordinate_reference(data, img_w, img_h)
+            scale_x = img_w / float(ref_w) if ref_w > 0 else 1.0
+            scale_y = img_h / float(ref_h) if ref_h > 0 else 1.0
 
             boxes = []
             for fld in data.get("fields", []):
@@ -146,19 +139,12 @@ def convert_to_yolo_format(
                 if fname not in class_to_id:
                     continue
 
-                bbox_data = fld.get("updated_bbox") if use_updated else fld.get("original_bbox")
-                if not bbox_data or "points" not in bbox_data:
-                    bbox_data = fld.get("updated_bbox") or fld.get("original_bbox")
-
-                if not bbox_data or "points" not in bbox_data:
+                pts = extract_field_points(fld)
+                if not pts or len(pts) < 2:
                     continue
 
-                pts = bbox_data["points"]
-                if len(pts) < 2:
-                    continue
-
-                xs = [int(round(p[0])) for p in pts]
-                ys = [int(round(p[1])) for p in pts]
+                xs = [p[0] * scale_x for p in pts]
+                ys = [p[1] * scale_y for p in pts]
 
                 xmin = max(0, min(xs))
                 xmax = min(img_w, max(xs))
@@ -173,8 +159,14 @@ def convert_to_yolo_format(
                 # Normalized coordinates for YOLO: <class_id> <x_center> <y_center> <width> <height>
                 xc = (xmin + xmax) / 2.0 / img_w
                 yc = (ymin + ymax) / 2.0 / img_h
-                nw = bw / img_w
-                nh = bh / img_h
+                nw = bw / float(img_w)
+                nh = bh / float(img_h)
+
+                # Clamp to [0, 1] range safely
+                xc = max(0.0, min(1.0, xc))
+                yc = max(0.0, min(1.0, yc))
+                nw = max(0.0, min(1.0, nw))
+                nh = max(0.0, min(1.0, nh))
 
                 boxes.append(f"{class_to_id[fname]} {xc:.6f} {yc:.6f} {nw:.6f} {nh:.6f}")
 
@@ -185,8 +177,11 @@ def convert_to_yolo_format(
             print(f"[!] Error processing {img_path}: {e}")
 
     print(f"\n[+] Successfully paired {len(records)} full card images with field bounding boxes.")
+    if missing_count > 0:
+        print(f"    - Unmatched images: {missing_count} (out of {len(json_files)} labels)")
+
     if not records:
-        print("[!] No valid samples could be prepared.")
+        print("[!] No valid samples could be prepared. Please check the logs above.")
         return
 
     # Shuffle and split into Train / Val
@@ -200,7 +195,7 @@ def convert_to_yolo_format(
         for img_src, b_list in split_items:
             base = os.path.basename(img_src)
             stem = os.path.splitext(base)[0]
-            # Copy or symlink image
+            # Copy image
             dest_img = os.path.join(target_img_dir, base)
             if not os.path.exists(dest_img):
                 shutil.copy2(img_src, dest_img)
@@ -239,8 +234,6 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="detector_data", help="Output directory for YOLO dataset")
     parser.add_argument("--val_split", type=float, default=0.15, help="Validation set split ratio (default 0.15)")
     args = parser.parse_args()
-
-    from prepare_dataset import resolve_dataset_paths
 
     lbl_dir, img_dir = resolve_dataset_paths(
         data_dir=args.data_dir,

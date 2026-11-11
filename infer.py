@@ -13,6 +13,7 @@ if hasattr(sys.stderr, "reconfigure"):
 import config
 from tokenizer import CTCLabelConverter
 from model import MobileOCRNet
+from prepare_dataset import extract_field_points, get_coordinate_reference
 
 def validate_iranian_national_id(code: str) -> bool:
     """
@@ -81,28 +82,35 @@ class NationalCardOCR:
             results = {}
 
             fields_to_process = []
+            meta = {}
             if json_path and os.path.exists(json_path):
                 with open(json_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                     fields_to_process = meta.get("fields", [])
 
+            ref_w, ref_h = get_coordinate_reference(meta, img_w, img_h)
+            scale_x = img_w / float(ref_w) if ref_w > 0 else 1.0
+            scale_y = img_h / float(ref_h) if ref_h > 0 else 1.0
+
             for f in fields_to_process:
                 name = f.get("name", "Unknown")
-                # Choose updated or original bbox
-                bbox = f.get("updated_bbox") or f.get("original_bbox")
-                if not bbox or "points" not in bbox:
+                pts = extract_field_points(f)
+                if not pts or len(pts) < 2:
                     continue
 
-                pts = bbox["points"]
-                xs = [p[0] for p in pts]
-                ys = [p[1] for p in pts]
-                xmin = max(0, min(xs))
-                ymin = max(0, min(ys))
-                xmax = min(img_w, max(xs))
-                ymax = min(img_h, max(ys))
+                xs = [p[0] * scale_x for p in pts]
+                ys = [p[1] * scale_y for p in pts]
+                xmin = max(0, int(round(min(xs))))
+                ymin = max(0, int(round(min(ys))))
+                xmax = min(img_w, int(round(max(xs))))
+                ymax = min(img_h, int(round(max(ys))))
 
                 crop = full_img.crop((xmin, ymin, xmax, ymax))
-                text = self.read_crop(crop)
+
+                if name.lower() in ("image", "photo", "face", "avatar", "portrait"):
+                    text = "[Photo/Image]"
+                else:
+                    text = self.read_crop(crop)
 
                 # Validation & post-processing
                 is_valid = None
