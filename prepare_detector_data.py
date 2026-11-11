@@ -240,19 +240,19 @@ if __name__ == "__main__":
     parser.add_argument("--val_split", type=float, default=0.15, help="Validation set split ratio (default 0.15)")
     args = parser.parse_args()
 
-    # Auto-resolve paths if data_dir provided
-    lbl_dir = args.labels_dir
-    img_dir = args.images_dir
-    if args.data_dir:
-        cand_l = os.path.join(args.data_dir, "labels")
-        cand_i = os.path.join(args.data_dir, "images")
-        if os.path.isdir(cand_l):
-            lbl_dir = cand_l
-        if os.path.isdir(cand_i):
-            img_dir = cand_i
+    from prepare_dataset import resolve_dataset_paths
 
-    if not lbl_dir or not img_dir:
-        print("[!] Error: Please specify --labels_dir and --images_dir (or --data_dir)")
+    lbl_dir, img_dir = resolve_dataset_paths(
+        data_dir=args.data_dir,
+        labels_dir=args.labels_dir,
+        images_dir=args.images_dir
+    )
+
+    if not lbl_dir or not img_dir or not os.path.isdir(lbl_dir) or not os.path.isdir(img_dir):
+        print(f"[!] Error: Could not resolve valid labels and images directories.")
+        print(f"    Labels Dir: {lbl_dir}")
+        print(f"    Images Dir: {img_dir}")
+        print("    Please specify --data_dir (or --labels_dir and --images_dir)")
         sys.exit(1)
 
     convert_to_yolo_format(

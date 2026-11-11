@@ -41,9 +41,16 @@ def train_field_detector(
     print(f"[*] Device         : {device}")
     print(f"[*] Hyperparameters: Epochs={epochs} | Batch={batch_size} | ImgSize={imgsz}")
 
-    # Load ultra-lightweight pretrained YOLOv8-nano (~3.2 MB)
+    # Load model: try pretrained yolov8n.pt first; fallback to yolov8n.yaml if offline
     print("[*] Initializing YOLOv8-Nano backbone...")
-    model = YOLO("yolov8n.pt")
+    try:
+        model = YOLO("yolov8n.pt")
+        print("[+] Loaded pretrained yolov8n.pt backbone.")
+    except Exception as e:
+        print(f"[*] Pretrained weights download unavailable ({e}).")
+        print("[*] Initializing YOLOv8-Nano architecture from scratch (yolov8n.yaml)...")
+        model = YOLO("yolov8n.yaml")
+        print("[+] YOLOv8-Nano model initialized successfully.")
 
     # Start training
     results = model.train(
