@@ -80,8 +80,13 @@ def train_field_detector(
         model = YOLO("yolov8n.yaml")
         print("[+] YOLOv8-Nano model initialized successfully.")
 
-    # Start training
-    print("\n[*] Starting YOLO training loop...")
+    # Start training with comprehensive mobile photography augmentations
+    print("\n[*] Starting YOLO training loop with mobile card augmentations...")
+    print("    - Geometric: rotation=+/-12°, perspective=0.0008, scale=0.35, shear=2.5°")
+    print("    - Lighting : HSV color jitter (H=0.02, S=0.6, V=0.4)")
+    print("    - Advanced : Mosaic=1.0, MixUp=0.15, CopyPaste=0.1, Erasing=0.2 (glare/finger occlusions)")
+    print("    - Layout   : Flipping disabled (preserves Persian reading direction & asymmetric card structure)")
+
     results = model.train(
         data=data_yaml,
         epochs=epochs,
@@ -91,7 +96,23 @@ def train_field_detector(
         project="runs/detector",
         name="id_field_detector",
         exist_ok=True,
-        verbose=True
+        verbose=True,
+        # --- Advanced Augmentations for Real-World Mobile Photos ---
+        degrees=12.0,       # Rotation (+/- 12 deg for camera tilt)
+        translate=0.08,     # Translation (+/- 8%)
+        scale=0.35,         # Scale variation (+/- 35% distance)
+        shear=2.5,          # Perspective shear (+/- 2.5 deg)
+        perspective=0.0008, # 3D perspective distortion (camera angle/skew)
+        flipud=0.0,         # Disabled: documents shouldn't be upside-down
+        fliplr=0.0,         # Disabled: strictly preserve Persian text orientation & card layout
+        hsv_h=0.02,         # Color hue jitter
+        hsv_s=0.6,          # Saturation jitter (washed out / intense lighting)
+        hsv_v=0.4,          # Brightness/contrast jitter (harsh flash, indoor shadow)
+        mosaic=1.0,         # 4-image mosaic composition
+        mixup=0.15,         # Mixup blending
+        copy_paste=0.1,     # Copy-paste augmentation
+        erasing=0.2,        # Random erasing (simulates holding fingers, glare, reflections)
+        auto_augment="randaugment"
     )
 
     # Copy best weights to checkpoints directory

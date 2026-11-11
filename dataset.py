@@ -1,15 +1,18 @@
 import os
+import random
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
+import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 import config
 from tokenizer import CTCLabelConverter
 
 class PersianOCRDataset(Dataset):
-    def __init__(self, label_file, is_train=True):
+    def __init__(self, label_file, is_train=True, augment=None):
         super().__init__()
         self.is_train = is_train
+        self.augment = augment if augment is not None else is_train
         self.samples = []
 
         if os.path.exists(label_file):
@@ -24,12 +27,45 @@ class PersianOCRDataset(Dataset):
                         label = parts[1].strip()
                         self.samples.append((img_path, label))
 
-        print(f"[*] Loaded {len(self.samples)} samples from: {os.path.basename(label_file)}")
+        print(f"[*] Loaded {len(self.samples)} samples from: {os.path.basename(label_file)} (Augmentations: {'ON' if self.augment else 'OFF'})")
+
+        if self.augment:
+            # Domain-specific text crop augmentations for Persian ID text
+            self.color_jitter = T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.25)
+            self.blur = T.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 1.2))
+            self.grayscale = T.RandomGrayscale(p=1.0)
+            self.affine = T.RandomAffine(degrees=(-3, 3), translate=(0.02, 0.04), scale=(0.96, 1.04), shear=(-2, 2), fill=255)
+            self.perspective = T.RandomPerspective(distortion_scale=0.08, p=1.0, fill=255)
+            self.erasing = T.RandomErasing(p=1.0, scale=(0.02, 0.08), ratio=(0.3, 3.3), value=0.0)
 
     def __len__(self):
         return len(self.samples)
 
+    def apply_augmentations(self, img: Image.Image) -> Image.Image:
+        # 1. Color / Brightness / Contrast jitter (simulates indoor lighting, shadow, flash)
+        if random.random() < 0.65:
+            img = self.color_jitter(img)
+
+        # 2. Camera focus blur / motion blur (simulates slight phone camera shake)
+        if random.random() < 0.35:
+            img = self.blur(img)
+
+        # 3. Grayscale conversion (some cameras/scans lose saturation)
+        if random.random() < 0.15:
+            img = self.grayscale(img)
+
+        # 4. Subtle rotation / skew / perspective (crop angle imperfection)
+        if random.random() < 0.45:
+            img = self.affine(img)
+        if random.random() < 0.30:
+            img = self.perspective(img)
+
+        return img
+
     def preprocess_image(self, img: Image.Image):
+        if self.augment:
+            img = self.apply_augmentations(img)
+
         # Target height is 32
         w, h = img.size
         scale = config.IMG_HEIGHT / float(h)
@@ -44,6 +80,17 @@ class PersianOCRDataset(Dataset):
         # Convert to tensor [3, H, W] in range [-1, 1]
         tensor = TF.to_tensor(resized_img)
         tensor = TF.normalize(tensor, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
+        # 5. Tensor-level sensor noise & scratch/glare cutout
+        if self.augment:
+            if random.random() < 0.30:
+                # Sensor ISO noise in low-light camera shots
+                noise = torch.randn_like(tensor) * 0.04
+                tensor = torch.clamp(tensor + noise, -1.0, 1.0)
+            if random.random() < 0.25:
+                # Small scratch or reflection spot
+                tensor = self.erasing(tensor)
+
         return tensor
 
     def __getitem__(self, idx):
